@@ -1,3 +1,7 @@
+// === Config remoto ===
+const API_URL = 'https://script.google.com/macros/s/SEU_DEPLOY_ID/exec';
+const USE_REMOTE = true; // liga/desliga o backend compartilhado
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -409,8 +413,60 @@
     return v;
   }
 
-  function saveDB(db){ localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
-  function loadDB(){ try { return JSON.parse(localStorage.getItem(STORAGE_KEY))||[]; } catch(e){ return []; } }
+  //function saveDB(db){ localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
+  //function loadDB(){ try { return JSON.parse(localStorage.getItem(STORAGE_KEY))||[]; } catch(e){ return []; } }
+function saveLocal(db){ localStorage.setItem('jurados_db_v1', JSON.stringify(db)); }
+function loadLocal(){ try { return JSON.parse(localStorage.getItem('jurados_db_v1')) || []; } catch(e){ return []; } }
+
+async function loadDB(){
+  if(!USE_REMOTE) return loadLocal();
+  try{
+    const r = await fetch(API_URL, { cache: 'no-store' });
+    if(!r.ok) throw new Error('Falha ao carregar remoto');
+    const arr = await r.json();
+    // Normalização opcional
+    const norm = Array.isArray(arr) ? arr.map(j => ({
+      ...j,
+      id: j.id || crypto.randomUUID(),
+      nome: (j.nome||'').toUpperCase(),
+      endereco: (j.endereco||'').toUpperCase(),
+      numero: (j.numero||'').toUpperCase(),
+      complemento: (j.complemento||'').toUpperCase(),
+      bairro: (j.bairro||'').toUpperCase(),
+      telefone: j.telefone||'',
+      profissao: (j.profissao||'').toUpperCase(),
+      dataNascimento: j.dataNascimento||'',
+      ultimoConselho: j.ultimoConselho||'',
+      status: (j.status||'ATIVO').toUpperCase(),
+      motivo: (j.motivo||'').toUpperCase(),
+      temporarioAte: j.temporarioAte||''
+    })) : [];
+    // mantém cópia local (cache)
+    saveLocal(norm);
+    return norm;
+  }catch(e){
+    console.error('loadDB remoto falhou, usando local:', e);
+    return loadLocal();
+  }
+}
+
+async function saveDB(db){
+  // sempre espelha local (backup)
+  saveLocal(db);
+  if(!USE_REMOTE) return;
+  try{
+    await fetch(API_URL, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(db)
+    });
+  }catch(e){
+    console.error('saveDB remoto falhou:', e);
+    alert('Aviso: não foi possível salvar no servidor agora. Os dados ficaram salvos localmente.');
+  }
+}
+
+
 
   function sortByName(arr){ return arr.sort((a,b)=> a.nome.localeCompare(b.nome,'pt-BR')); }
 
@@ -510,7 +566,7 @@
   qs('#btn-clear').addEventListener('click', ()=>{ form.reset(); idadeLabel.textContent='—'; qs('#jurado-id').value=''; updateMotivoAvailability(); });
 
   // Save jurado
-  form.addEventListener('submit', (ev)=>{
+  form.addEventListener('submit', async (ev)=>{
     ev.preventDefault();
     const j = {
       id: qs('#jurado-id').value || crypto.randomUUID(),
@@ -534,7 +590,7 @@
     }
     if(!validCPF(j.cpf)) { alert('CPF inválido.'); return; }
     // Duplicates
-    let db = loadDB();
+    let db = await loadDB();
     const byCPF = db.find(x=> onlyDigits(x.cpf)===onlyDigits(j.cpf) && x.id!==j.id);
     if(byCPF){ alert('CPF já cadastrado.'); return; }
     const byNome = db.find(x=> x.nome===j.nome && x.id!==j.id);
@@ -543,10 +599,10 @@
     // If editing existing, replace; else push
     const idx = db.findIndex(x=>x.id===j.id);
     if(idx>=0) db[idx]=j; else db.push(j);
-
     db = sortByName(db);
     db = recalcAutoRules(db);
-    saveDB(db);
+    await saveDB(db);
+    await loadDB();
     renderGrid();
     alert('Registro salvo com sucesso.');
     form.reset(); idadeLabel.textContent='—'; qs('#jurado-id').value=''; updateMotivoAvailability();
@@ -605,9 +661,18 @@
     document.querySelector('#rel-prof').innerHTML = Object.entries(porProf).sort((a,b)=>a[0].localeCompare(b[0],'pt-BR')).map(([k,v])=>`<div>${k||'(vazio)'}: <b>${v}</b></div>`).join('')||'<em>Sem dados</em>';
   }
 
-  grid.addEventListener('click', (e)=>{
+  grid.addEventListener('click', async (e)=>{
     const btn = e.target.closest('button'); if(!btn) return;
     const id = btn.dataset.id; const act = btn.dataset.act;
+    if(act === 'del'){
+      if(confirm('Confirma a exclusão deste registro?')){
+        let db = await loadDB();
+        db = db.filter(x=> x.id !== id);
+        await saveDB(db);
+        await loadDB();
+        renderGrid();
+      }
+    }
     let db = loadDB();
     const j = db.find(x=>x.id===id);
     if(!j) return;
@@ -770,11 +835,11 @@
     modalConselho.show();
   });
 
-  document.querySelector('#btn-salvar-conselho').addEventListener('click', ()=>{
+  document.querySelector('#btn-salvar-conselho').addEventListener('click', async ()=>{
     const data = document.querySelector('#cons-data').value; if(!data){ alert('Informe a data do Conselho.'); return; }
     const cpfs = Array.from(document.querySelectorAll('.cpf-cons')).map(i=> i.value).filter(v=> v && validCPF(v));
     if(cpfs.length!==7){ alert('Informe exatamente 7 CPFs válidos.'); return; }
-    let db = loadDB();
+    let db = await loadDB();
     const miss = [];
     cpfs.forEach(cpf=>{
       const j = db.find(x=> onlyDigits(x.cpf)===onlyDigits(cpf));
@@ -782,7 +847,9 @@
     });
     if(miss.length){ alert('CPFs não encontrados: '+miss.join(', ')); }
     db = recalcAutoRules(db);
-    saveDB(db); renderGrid(); modalConselho.hide(); alert('Último Conselho aplicado.');
+    await saveDB(db);
+    await loadDB();
+    renderGrid(); modalConselho.hide(); alert('Último Conselho aplicado.');
   });
 
   // Login flow
@@ -795,7 +862,7 @@
     const pass = document.querySelector('#login-pass').value;
     const cred = await getCred();
     const ok = (user===cred.user) && ((await sha256(pass))===cred.passHash);
-    if(ok){ loginOverlay.style.display='none'; renderGrid(); } else { alert('Usuário ou senha inválidos.'); }
+    if(ok){ loginOverlay.style.display='none'; await loadDB(); renderGrid(); } else { alert('Usuário ou senha inválidos.'); }
   });
 
   // Change credentials
